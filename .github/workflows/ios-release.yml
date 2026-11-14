@@ -1,6 +1,22 @@
 name: Build STALKER Mobile Release IPA
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/trilogy-launcher-v3
+    paths:
+      - 'Sources/**'
+      - 'Resources/**'
+      - 'project.yml'
+      - 'scripts/package_unsigned_ipa.py'
+      - '.github/workflows/ios-release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-ipa:
@@ -59,7 +75,7 @@ jobs:
           xcodegen generate
       - name: Build unsigned Release app for iPhone
         run: |
-          xcodebuild -project STALKERiOSStarter.xcodeproj -scheme STALKERiOSStarter -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -project STALKERiOSStarter.xcodeproj -scheme STALKERiOSStarter -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO ENABLE_DEBUG_DYLIB=NO build
       - name: Validate and package IPA
         run: |
           set -euo pipefail
@@ -74,9 +90,15 @@ jobs:
               assert z.testzip() is None
               base = 'Payload/STALKERiOSStarter.app/'
               info = plistlib.loads(z.read(base + 'Info.plist'))
+              for key in ('CFBundleIdentifier', 'CFBundleExecutable', 'CFBundleShortVersionString', 'CFBundleVersion'):
+                  assert isinstance(info.get(key), str) and info[key].strip(), f'Missing or invalid {key}'
               assert info['CFBundleExecutable'] == 'STALKERiOSStarter'
-              assert info['CFBundleIdentifier']
+              assert info['CFBundleSupportedPlatforms'] == ['iPhoneOS']
               assert base + 'STALKERiOSStarter' in z.namelist()
+              assert len(z.read(base + 'Assets.car')) > 0, 'Missing compiled application icon'
+              assert info['CFBundleIcons']['CFBundlePrimaryIcon']['CFBundleIconName'] == 'AppIcon'
+              for card in ('card_shadow.jpg', 'card_clearSky.jpg', 'card_pripyat.jpg'):
+                  assert len(z.read(base + 'Resources/' + card)) > 0, f'Missing game card: {card}'
               assert not any(name.endswith('.debug.dylib') or name.endswith('__preview.dylib') for name in z.namelist()), 'Unexpected debug library in Release IPA'
           print('Release IPA structure verified; signing and iPhone installation remain unverified')
           PY
@@ -86,3 +108,4 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           path: STALKERiOSStarter-Release-unsigned.ipa
+
