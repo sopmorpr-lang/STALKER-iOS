@@ -1,0 +1,88 @@
+name: Build STALKER Mobile Release IPA
+on:
+  workflow_dispatch:
+
+jobs:
+  release-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned OpenXRay support sources
+        uses: actions/checkout@v4
+        with:
+          repository: Eternal-Entropia/openxray-android
+          ref: 1b84cfbc5efa3e9af942164e5a3c2dde43b77f51
+          path: openxray-upstream
+          persist-credentials: false
+          sparse-checkout: |
+            src/xrCore/crc32.cpp
+            oxr_deps/lzo-src/minilzo/minilzo.c
+            oxr_deps/lzo-src/minilzo/minilzo.h
+            oxr_deps/lzo-src/include/lzo/lzoconf.h
+            oxr_deps/lzo-src/include/lzo/lzodefs.h
+            oxr_deps/lzo-src/COPYING
+            License.txt
+          sparse-checkout-cone-mode: false
+      - name: Stage native support sources
+        run: |
+          set -euo pipefail
+          test "$(git -C openxray-upstream rev-parse HEAD)" = "1b84cfbc5efa3e9af942164e5a3c2dde43b77f51"
+          test -s openxray-upstream/License.txt
+          cp openxray-upstream/src/xrCore/crc32.cpp Sources/Native/Upstream/crc32.cpp
+          cp openxray-upstream/oxr_deps/lzo-src/minilzo/minilzo.c Sources/Native/Upstream/minilzo.c
+          cp openxray-upstream/oxr_deps/lzo-src/minilzo/minilzo.h Sources/Native/Upstream/minilzo.h
+          cp openxray-upstream/oxr_deps/lzo-src/include/lzo/lzoconf.h Sources/Native/Upstream/lzoconf.h
+          cp openxray-upstream/oxr_deps/lzo-src/include/lzo/lzodefs.h Sources/Native/Upstream/lzodefs.h
+          cp openxray-upstream/oxr_deps/lzo-src/COPYING Sources/Native/Upstream/LZO-COPYING
+      - name: Prepare application icon
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          source = Path('Resources/AppIcon.png')
+          assert source.is_file(), 'Missing application icon'
+          target = Path('Sources/Assets.xcassets/AppIcon.appiconset')
+          target.mkdir(parents=True, exist_ok=True)
+          icon = target / 'AppIcon.png'
+          subprocess.run(['sips', '-s', 'format', 'png', str(source), '--out', str(icon)], check=True)
+          subprocess.run(['sips', '-z', '1024', '1024', str(icon), '--out', str(icon)], check=True)
+          (target / 'Contents.json').write_text(json.dumps({
+              'images': [{'filename': 'AppIcon.png', 'idiom': 'universal', 'platform': 'ios', 'size': '1024x1024'}],
+              'info': {'author': 'xcode', 'version': 1}
+          }, indent=2) + '\n')
+          PY
+      - name: Install XcodeGen and generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build unsigned Release app for iPhone
+        run: |
+          xcodebuild -project STALKERiOSStarter.xcodeproj -scheme STALKERiOSStarter -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO build
+      - name: Validate and package IPA
+        run: |
+          set -euo pipefail
+          APP='build-device/Build/Products/Release-iphoneos/STALKERiOSStarter.app'
+          test -s "$APP/Info.plist"
+          lipo "$APP/STALKERiOSStarter" -verify_arch arm64
+          python3 scripts/package_unsigned_ipa.py "$APP" STALKERiOSStarter-Release-unsigned.ipa
+          python3 - <<'PY'
+          import plistlib, zipfile
+          path = 'STALKERiOSStarter-Release-unsigned.ipa'
+          with zipfile.ZipFile(path) as z:
+              assert z.testzip() is None
+              base = 'Payload/STALKERiOSStarter.app/'
+              info = plistlib.loads(z.read(base + 'Info.plist'))
+              assert info['CFBundleExecutable'] == 'STALKERiOSStarter'
+              assert info['CFBundleIdentifier']
+              assert base + 'STALKERiOSStarter' in z.namelist()
+              assert not any(name.endswith('.debug.dylib') or name.endswith('__preview.dylib') for name in z.namelist()), 'Unexpected debug library in Release IPA'
+          print('Release IPA structure verified; signing and iPhone installation remain unverified')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: STALKER-Mobile-Release-IPA
+          if-no-files-found: error
+          compression-level: 0
+          path: STALKERiOSStarter-Release-unsigned.ipa
